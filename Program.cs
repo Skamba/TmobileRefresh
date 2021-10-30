@@ -22,6 +22,8 @@ namespace TmobileRefresh
         static string subscriptionUrl;
         //I'm only using the A0DAY01 bundle, and can't test for other bundles.
         static string bundle = "A0DAY01";
+        //assuming speed of 20 MB/s
+        static int speed = 20;
 
         static async System.Threading.Tasks.Task Main(string[] args)
         {
@@ -124,7 +126,7 @@ namespace TmobileRefresh
                 if (!httpcontent.Contains(bundle))
                 {
                     await TopUp();
-                    sleeptimer = 120000;
+                    sleeptimer = 90000;
                 }
                 // If we have it in the body, we need to check how much we have remaining. If there's less than 400 MB, top up
                 else
@@ -137,18 +139,9 @@ namespace TmobileRefresh
                         await TopUp();
                         sleeptimer = 90000;
                     }
-                    else if(remaining > 1500000)
+                    else
                     {
-                        sleeptimer = 75000;
-                    } else if (remaining > 1000000)
-                    {
-                        sleeptimer = 50000;
-                    } else if (remaining > 750000)
-                    {
-                        sleeptimer = 30000;
-                    } else
-                    {
-                        sleeptimer = 20000;
+                        sleeptimer = remaining / speed;
                     }
                 }
                 Console.WriteLine("Sleeping for "+ sleeptimer/1000 +" seconds");
