@@ -2,7 +2,7 @@
 
 A tool to automatically top up the Tmobile (Netherlands) free 2 GB bundles for the Unlimited subscription.
 
-Run from the command line. The first parameter is the password, the second one is your password.
+Run from the command line. The first parameter is the user name, the second one is your password.
 
 DISCLAIMER
 
