@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "TmobileRefresh": {
+      "commandName": "Project",
+      "commandLineArgs": "test test"
+    }
+  }
+}
