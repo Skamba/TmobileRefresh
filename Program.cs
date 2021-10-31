@@ -119,30 +119,36 @@ namespace TmobileRefresh
                 //client.DefaultRequestHeaders.TryAddWithoutValidation("Content-Type", "application/json");
                 response = await client.GetAsync(subscriptionUrl + "/roamingbundles");
                 httpcontent = await response.Content.ReadAsStringAsync();
+                
 
                 array = JsonConvert.DeserializeObject<JObject>(httpcontent);
-               
+                //extract how much data we have left in our bundle
+                int remaining = (int)array.SelectToken("Bundles[1].Remaining.Value");
+                Console.WriteLine("Remaining: " + remaining);
+
+                //if the bundle is 0, we underestimated our speed
+                if(remaining == 0)
+                {
+                    speed++;
+                }
+
                 // If our  response body does not contain the bundle, we havent added it yet today
                 if (!httpcontent.Contains(bundle))
                 {
                     await TopUp();
-                    sleeptimer = 90000;
+                    remaining = 2000000;
                 }
                 // If we have it in the body, we need to check how much we have remaining. If there's less than 400 MB, top up
                 else
                 {
-                    int remaining = (int)array.SelectToken("Bundles[1].Remaining.Value");
-                    Console.WriteLine("Remaining: " + remaining);
                     //Depending on how much we have left in the bundle, we either want to top up or sleep until the bundle is running out
                     if (remaining < 400000)
                     {
                         await TopUp();
-                        sleeptimer = 90000;
+                        remaining = 2000000;
                     }
-                    else
-                    {
-                        sleeptimer = remaining / speed;
-                    }
+                    // depending on how long this bundle will last for sure, sleep
+                    sleeptimer = remaining / speed;
                 }
                 Console.WriteLine("Sleeping for "+ sleeptimer/1000 +" seconds");
                 Thread.Sleep(sleeptimer);
