@@ -23,7 +23,7 @@ namespace TmobileRefresh
         //I'm only using the A0DAY01 bundle, and can't test for other bundles.
         static string bundle = "A0DAY01";
         //assuming speed of 20 MB/s
-        static int speed = 20;
+        static int speed = 25;
 
         static async System.Threading.Tasks.Task Main(string[] args)
         {
