@@ -27,3 +27,15 @@ steps:
   inputs:
     command: 'build'
     configuration: '$(buildConfiguration)'
+
+- task: GitHubRelease@1
+  inputs:
+    gitHubConnection: 'github.com_Skamba'
+    repositoryName: 'Skamba/TmobileRefresh'
+    action: 'create'
+    target: '$(Build.SourceVersion)'
+    tagSource: 'userSpecifiedTag'
+    tag: 'Release'
+    isDraft: true
+    changeLogCompareToRelease: 'lastFullRelease'
+    changeLogType: 'commitBased'
