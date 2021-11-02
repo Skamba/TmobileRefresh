@@ -24,9 +24,10 @@ steps:
 - task: DotNetCoreCLI@2
   inputs:
     command: 'publish'
+    zipAfterPublish: false
     publishWebProjects: false
     projects: '**/*.csproj'
-    arguments: '-r win-x64 -p:PublishSingleFile=True --self-contained false -o $(Build.ArtifactStagingDirectory)/windows'
+    arguments: '-r win-x64 -p:PublishSingleFile=True --self-contained false -o $(Build.ArtifactStagingDirectory)'
 - task: GitHubRelease@1
   inputs:
     gitHubConnection: 'github.com_Skamba'
