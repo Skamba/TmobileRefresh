@@ -33,6 +33,7 @@ steps:
     gitHubConnection: 'github.com_Skamba'
     repositoryName: 'Skamba/TmobileRefresh'
     action: 'create'
+    assets: '$(Build.ArtifactStagingDirectory)/*.*'
     target: '$(Build.SourceVersion)'
     tagSource: 'userSpecifiedTag'
     tag: 'Release'
