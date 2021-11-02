@@ -26,7 +26,7 @@ steps:
     command: 'publish'
     publishWebProjects: false
     projects: '**/*.csproj'
-    arguments: '-o $(Build.ArtifactStagingDirectory)/Output'
+    arguments: '-o -r win-x64 -p:PublishSingleFile=True --self-contained false $(Build.ArtifactStagingDirectory)'
 - task: GitHubRelease@1
   inputs:
     gitHubConnection: 'github.com_Skamba'
