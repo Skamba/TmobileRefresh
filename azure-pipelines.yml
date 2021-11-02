@@ -24,7 +24,9 @@ steps:
 - task: DotNetCoreCLI@2
   inputs:
     command: 'publish'
-    configuration: '$(buildConfiguration)'
+    publishWebProjects: false
+    projects: '**/*.csproj'
+    arguments: '-o $(Build.ArtifactStagingDirectory)/Output'
 - task: GitHubRelease@1
   inputs:
     gitHubConnection: 'github.com_Skamba'
