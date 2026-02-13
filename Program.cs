@@ -6,6 +6,7 @@ namespace TmobileRefresh;
 
 internal static class Program
 {
+    private const string LocalSecretsFileName = "secrets.local.json";
     private const string DefaultUserAgent = "Odido 8.0.0 (Android 14; 14)";
     private const string DefaultBasicAuthToken = "OWhhdnZhdDZobTBiOTYyaTo=";
     private const string DefaultClientId = "9havvat6hm0b962i";
@@ -19,17 +20,27 @@ internal static class Program
 
     private static async Task<int> Main(string[] args)
     {
-        if (args.Length < 2)
+        LoadLocalSecretsIfPresent();
+
+        var username = args.ElementAtOrDefault(0) ?? Environment.GetEnvironmentVariable("ODIDO_USERNAME");
+        var password = args.ElementAtOrDefault(1) ?? Environment.GetEnvironmentVariable("ODIDO_PASSWORD");
+
+        if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
         {
             Console.WriteLine("Usage: TmobileRefresh <username> <password> [bundleCode] [estimatedBytesPerMs]");
+            Console.WriteLine("Or set ODIDO_USERNAME and ODIDO_PASSWORD via environment variables or secrets.local.json.");
             return 1;
         }
 
         var options = new AppOptions(
-            Username: args[0],
-            Password: args[1],
-            BundleCode: args.ElementAtOrDefault(2) ?? DefaultBundleCode,
-            EstimatedBytesPerMs: ParseEstimatedSpeed(args.ElementAtOrDefault(3)));
+            Username: username,
+            Password: password,
+            BundleCode: args.ElementAtOrDefault(2)
+                ?? Environment.GetEnvironmentVariable("ODIDO_BUNDLE_CODE")
+                ?? DefaultBundleCode,
+            EstimatedBytesPerMs: ParseEstimatedSpeed(
+                args.ElementAtOrDefault(3)
+                ?? Environment.GetEnvironmentVariable("ODIDO_ESTIMATED_BYTES_PER_MS")));
 
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) =>
@@ -66,6 +77,48 @@ internal static class Program
 
         // 25 bytes/ms ~= 25 KB/s. This is intentionally conservative to top up before depletion.
         return 25;
+    }
+
+    private static void LoadLocalSecretsIfPresent()
+    {
+        if (!File.Exists(LocalSecretsFileName))
+        {
+            return;
+        }
+
+        try
+        {
+            var secretsJson = JObject.Parse(File.ReadAllText(LocalSecretsFileName));
+            SetEnvironmentVariableIfMissing(secretsJson, "ODIDO_USERNAME");
+            SetEnvironmentVariableIfMissing(secretsJson, "ODIDO_PASSWORD");
+            SetEnvironmentVariableIfMissing(secretsJson, "ODIDO_BUNDLE_CODE");
+            SetEnvironmentVariableIfMissing(secretsJson, "ODIDO_ESTIMATED_BYTES_PER_MS");
+            SetEnvironmentVariableIfMissing(secretsJson, "ODIDO_API_BASE_URL");
+            SetEnvironmentVariableIfMissing(secretsJson, "ODIDO_CLIENT_ID");
+            SetEnvironmentVariableIfMissing(secretsJson, "ODIDO_BASIC_AUTH_TOKEN");
+            SetEnvironmentVariableIfMissing(secretsJson, "ODIDO_SCOPE");
+            SetEnvironmentVariableIfMissing(secretsJson, "ODIDO_USER_AGENT");
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Warning: could not load {LocalSecretsFileName}: {ex.Message}");
+        }
+    }
+
+    private static void SetEnvironmentVariableIfMissing(JObject secretsJson, string variableName)
+    {
+        if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(variableName)))
+        {
+            return;
+        }
+
+        var value = secretsJson.SelectToken(variableName)?.ToString();
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return;
+        }
+
+        Environment.SetEnvironmentVariable(variableName, value);
     }
 
     private sealed record AppOptions(string Username, string Password, string BundleCode, int EstimatedBytesPerMs);
