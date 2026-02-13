@@ -281,13 +281,15 @@ internal static class Program
         private async Task TopUpAsync(Session session, string bundleCode, CancellationToken cancellationToken)
         {
             Console.WriteLine("Requesting new package...");
+            var payload = new JObject(
+                new JProperty("Bundles",
+                    new JArray(
+                        new JObject(new JProperty("BuyingCode", bundleCode)))))
+                .ToString();
 
             using var request = new HttpRequestMessage(HttpMethod.Post, $"{session.SubscriptionUrl}/roamingbundles")
             {
-                Content = new StringContent(
-                    $$"{"Bundles":[{"BuyingCode":"{{bundleCode}}"}]}",
-                    Encoding.UTF8,
-                    "application/json")
+                Content = new StringContent(payload, Encoding.UTF8, "application/json")
             };
 
             using var response = await _client.SendAsync(request, cancellationToken);
