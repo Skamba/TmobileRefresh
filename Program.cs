@@ -6,10 +6,15 @@ namespace TmobileRefresh;
 
 internal static class Program
 {
-    private const string UserAgent = "T-Mobile 5.3.28 (Android 10; 10)";
-    private const string BasicAuthToken = "OWhhdnZhdDZobTBiOTYyaTo=";
-    private const string ClientId = "9havvat6hm0b962i";
-    private const string Scope = "usage+readfinancial+readsubscription+readpersonal+readloyalty+changesubscription+weblogin";
+    private const string DefaultUserAgent = "Odido 8.0.0 (Android 14; 14)";
+    private const string DefaultBasicAuthToken = "OWhhdnZhdDZobTBiOTYyaTo=";
+    private const string DefaultClientId = "9havvat6hm0b962i";
+    private const string DefaultScope = "usage+readfinancial+readsubscription+readpersonal+readloyalty+changesubscription+weblogin";
+    private static readonly string[] DefaultApiBaseUrls =
+    {
+        "https://capi.odido.nl",
+        "https://capi.t-mobile.nl"
+    };
     private const string DefaultBundleCode = "A0DAY01";
 
     private static async Task<int> Main(string[] args)
@@ -67,6 +72,8 @@ internal static class Program
 
     private sealed record Session(string AccessToken, string SubscriptionUrl);
 
+    private sealed record ApiProfile(string BaseUrl, string ClientId, string BasicAuthToken, string Scope);
+
     private sealed class TMobileApiClient : IDisposable
     {
         private readonly HttpClient _client;
@@ -77,33 +84,47 @@ internal static class Program
             {
                 Timeout = TimeSpan.FromSeconds(30)
             };
-            _client.DefaultRequestHeaders.UserAgent.ParseAdd(UserAgent);
+            _client.DefaultRequestHeaders.UserAgent.ParseAdd(Environment.GetEnvironmentVariable("ODIDO_USER_AGENT") ?? DefaultUserAgent);
             _client.DefaultRequestHeaders.Accept.ParseAdd("application/json");
         }
 
         public async Task<Session> CreateSessionAsync(AppOptions options, CancellationToken cancellationToken)
         {
-            var authorizationCode = await RequestAuthorizationCodeAsync(options, cancellationToken);
-            var accessToken = await RequestAccessTokenAsync(authorizationCode, cancellationToken);
-
-            _client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
-            var linkedSubscriptions = await GetJsonWithRedirectRetryAsync("https://capi.t-mobile.nl/account/current?resourcelabel=LinkedSubscriptions", cancellationToken);
-            var linkedUrl = linkedSubscriptions.SelectToken("Resources[0].Url")?.ToString();
-
-            if (string.IsNullOrWhiteSpace(linkedUrl))
+            Exception? lastError = null;
+            foreach (var profile in GetApiProfiles())
             {
-                throw new InvalidOperationException("No linked subscription URL found for this account.");
+                try
+                {
+                    var authorizationCode = await RequestAuthorizationCodeAsync(options, profile, cancellationToken);
+                    var accessToken = await RequestAccessTokenAsync(authorizationCode, profile, cancellationToken);
+
+                    _client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+                    var linkedSubscriptions = await GetJsonWithRedirectRetryAsync($"{profile.BaseUrl}/account/current?resourcelabel=LinkedSubscriptions", cancellationToken);
+                    var linkedUrl = linkedSubscriptions.SelectToken("Resources[0].Url")?.ToString();
+
+                    if (string.IsNullOrWhiteSpace(linkedUrl))
+                    {
+                        throw new InvalidOperationException("No linked subscription URL found for this account.");
+                    }
+
+                    var subscriptionDetails = await GetJsonAsync(linkedUrl, cancellationToken);
+                    var subscriptionUrl = subscriptionDetails.SelectToken("subscriptions[0].SubscriptionURL")?.ToString();
+
+                    if (string.IsNullOrWhiteSpace(subscriptionUrl))
+                    {
+                        throw new InvalidOperationException("No subscription URL found for this account.");
+                    }
+
+                    Console.WriteLine($"Authenticated using API base URL: {profile.BaseUrl}");
+                    return new Session(accessToken, subscriptionUrl);
+                }
+                catch (Exception ex)
+                {
+                    lastError = ex;
+                }
             }
 
-            var subscriptionDetails = await GetJsonAsync(linkedUrl, cancellationToken);
-            var subscriptionUrl = subscriptionDetails.SelectToken("subscriptions[0].SubscriptionURL")?.ToString();
-
-            if (string.IsNullOrWhiteSpace(subscriptionUrl))
-            {
-                throw new InvalidOperationException("No subscription URL found for this account.");
-            }
-
-            return new Session(accessToken, subscriptionUrl);
+            throw new InvalidOperationException("Failed to authenticate against all configured Odido API endpoints.", lastError);
         }
 
         public async Task RunAutoTopUpLoopAsync(AppOptions options, Session session, CancellationToken cancellationToken)
@@ -136,20 +157,36 @@ internal static class Program
             }
         }
 
-        private async Task<string> RequestAuthorizationCodeAsync(AppOptions options, CancellationToken cancellationToken)
+        private static IReadOnlyList<ApiProfile> GetApiProfiles()
         {
-            using var request = new HttpRequestMessage(HttpMethod.Post, "https://capi.t-mobile.nl/login?response_type=code")
+            var explicitBase = Environment.GetEnvironmentVariable("ODIDO_API_BASE_URL");
+            var baseUrls = string.IsNullOrWhiteSpace(explicitBase)
+                ? DefaultApiBaseUrls
+                : new[] { explicitBase };
+
+            var clientId = Environment.GetEnvironmentVariable("ODIDO_CLIENT_ID") ?? DefaultClientId;
+            var basicAuthToken = Environment.GetEnvironmentVariable("ODIDO_BASIC_AUTH_TOKEN") ?? DefaultBasicAuthToken;
+            var scope = Environment.GetEnvironmentVariable("ODIDO_SCOPE") ?? DefaultScope;
+
+            return baseUrls
+                .Select(baseUrl => new ApiProfile(baseUrl.TrimEnd('/'), clientId, basicAuthToken, scope))
+                .ToArray();
+        }
+
+        private async Task<string> RequestAuthorizationCodeAsync(AppOptions options, ApiProfile profile, CancellationToken cancellationToken)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, $"{profile.BaseUrl}/login?response_type=code")
             {
                 Content = new FormUrlEncodedContent(new Dictionary<string, string>
                 {
                     ["Username"] = options.Username,
                     ["Password"] = options.Password,
-                    ["ClientId"] = ClientId,
-                    ["Scope"] = Scope
+                    ["ClientId"] = profile.ClientId,
+                    ["Scope"] = profile.Scope
                 })
             };
 
-            request.Headers.Authorization = new AuthenticationHeaderValue("Basic", BasicAuthToken);
+            request.Headers.Authorization = new AuthenticationHeaderValue("Basic", profile.BasicAuthToken);
             using var response = await _client.SendAsync(request, cancellationToken);
 
             if (!response.Headers.TryGetValues("AuthorizationCode", out var values))
@@ -166,9 +203,9 @@ internal static class Program
             return code;
         }
 
-        private async Task<string> RequestAccessTokenAsync(string authorizationCode, CancellationToken cancellationToken)
+        private async Task<string> RequestAccessTokenAsync(string authorizationCode, ApiProfile profile, CancellationToken cancellationToken)
         {
-            using var request = new HttpRequestMessage(HttpMethod.Post, "https://capi.t-mobile.nl/createtoken")
+            using var request = new HttpRequestMessage(HttpMethod.Post, $"{profile.BaseUrl}/createtoken")
             {
                 Content = new FormUrlEncodedContent(new Dictionary<string, string>
                 {
