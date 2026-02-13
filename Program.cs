@@ -1,177 +1,262 @@
-﻿using System;
-using System.Threading;
-using System.Net.Http;
-using System.Collections.Generic;
 using System.Net.Http.Headers;
-using System.Linq;
-using Newtonsoft.Json;
-using Newtonsoft.Json.Linq;
-using System.Web;
-using System.Net;
 using System.Text;
+using Newtonsoft.Json.Linq;
 
-namespace TmobileRefresh
+namespace TmobileRefresh;
+
+internal static class Program
 {
-    class Program
+    private const string UserAgent = "T-Mobile 5.3.28 (Android 10; 10)";
+    private const string BasicAuthToken = "OWhhdnZhdDZobTBiOTYyaTo=";
+    private const string ClientId = "9havvat6hm0b962i";
+    private const string Scope = "usage+readfinancial+readsubscription+readpersonal+readloyalty+changesubscription+weblogin";
+    private const string DefaultBundleCode = "A0DAY01";
+
+    private static async Task<int> Main(string[] args)
     {
-        static string login;
-        static string password;
-
-        static string authorizationCode;
-        static string accessToken;
-        static string subscriptionUrl;
-        //I'm only using the A0DAY01 bundle, and can't test for other bundles.
-        static string bundle = "A0DAY01";
-        //assuming speed of 25 MB/s
-        static int speed = 25;
-
-        static async System.Threading.Tasks.Task Main(string[] args)
+        if (args.Length < 2)
         {
-            //load username and password from command line
-            if(args.Length<2)
-            {
-                Console.WriteLine("Please add username and password");
-                return;
-            } else
-            {
-                login = args[0];
-                password = args[1];
-            }
+            Console.WriteLine("Usage: TmobileRefresh <username> <password> [bundleCode] [estimatedBytesPerMs]");
+            return 1;
+        }
 
-            //do initial authorization token request
-            HttpClient client = new HttpClient();
-            client.DefaultRequestHeaders.UserAgent.ParseAdd("T-Mobile 5.3.28 (Android 10; 10)");
-            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", "OWhhdnZhdDZobTBiOTYyaTo=");
+        var options = new AppOptions(
+            Username: args[0],
+            Password: args[1],
+            BundleCode: args.ElementAtOrDefault(2) ?? DefaultBundleCode,
+            EstimatedBytesPerMs: ParseEstimatedSpeed(args.ElementAtOrDefault(3)));
 
-            //set post body
-            var values = new Dictionary<string, string>
+        using var cts = new CancellationTokenSource();
+        Console.CancelKeyPress += (_, e) =>
+        {
+            e.Cancel = true;
+            cts.Cancel();
+            Console.WriteLine("Stopping...");
+        };
+
+        try
+        {
+            using var api = new TMobileApiClient();
+            var session = await api.CreateSessionAsync(options, cts.Token);
+            await api.RunAutoTopUpLoopAsync(options, session, cts.Token);
+            return 0;
+        }
+        catch (OperationCanceledException)
+        {
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Fatal error: {ex.Message}");
+            return 2;
+        }
+    }
+
+    private static int ParseEstimatedSpeed(string? value)
+    {
+        if (int.TryParse(value, out var parsed) && parsed > 0)
+        {
+            return parsed;
+        }
+
+        // 25 bytes/ms ~= 25 KB/s. This is intentionally conservative to top up before depletion.
+        return 25;
+    }
+
+    private sealed record AppOptions(string Username, string Password, string BundleCode, int EstimatedBytesPerMs);
+
+    private sealed record Session(string AccessToken, string SubscriptionUrl);
+
+    private sealed class TMobileApiClient : IDisposable
+    {
+        private readonly HttpClient _client;
+
+        public TMobileApiClient()
+        {
+            _client = new HttpClient
             {
-                {"Username", login},
-                {"Password", password},
-                {"ClientId", "9havvat6hm0b962i"},
-                { "Scope", "usage+readfinancial+readsubscription+readpersonal+readloyalty+changesubscription+weblogin"}
+                Timeout = TimeSpan.FromSeconds(30)
             };
-            var content = new FormUrlEncodedContent(values);
+            _client.DefaultRequestHeaders.UserAgent.ParseAdd(UserAgent);
+            _client.DefaultRequestHeaders.Accept.ParseAdd("application/json");
+        }
 
-            //create post request to get the authorization code
-            var response = await client.PostAsync("https://capi.t-mobile.nl/login?response_type=code", content);
+        public async Task<Session> CreateSessionAsync(AppOptions options, CancellationToken cancellationToken)
+        {
+            var authorizationCode = await RequestAuthorizationCodeAsync(options, cancellationToken);
+            var accessToken = await RequestAccessTokenAsync(authorizationCode, cancellationToken);
 
-            //Get the authorization code from the response
-            IEnumerable<string> headervalues;
-            response.Headers.TryGetValues("AuthorizationCode", out headervalues);
-            if(headervalues == null)
+            _client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+            var linkedSubscriptions = await GetJsonWithRedirectRetryAsync("https://capi.t-mobile.nl/account/current?resourcelabel=LinkedSubscriptions", cancellationToken);
+            var linkedUrl = linkedSubscriptions.SelectToken("Resources[0].Url")?.ToString();
+
+            if (string.IsNullOrWhiteSpace(linkedUrl))
             {
-                Console.WriteLine("Could not get the authorization code, are the username and password correct?");
-                return;
+                throw new InvalidOperationException("No linked subscription URL found for this account.");
             }
-            authorizationCode = headervalues.FirstOrDefault();
 
-            // get access token
-            // set post body
-            values = new Dictionary<string, string>
+            var subscriptionDetails = await GetJsonAsync(linkedUrl, cancellationToken);
+            var subscriptionUrl = subscriptionDetails.SelectToken("subscriptions[0].SubscriptionURL")?.ToString();
+
+            if (string.IsNullOrWhiteSpace(subscriptionUrl))
             {
-                {"AuthorizationCode", authorizationCode }
-            };
-            content = new FormUrlEncodedContent(values);
-
-            //create post request to get the access token
-            response = await client.PostAsync("https://capi.t-mobile.nl/createtoken", content);
-
-            //get the access token from the response
-            response.Headers.TryGetValues("AccessToken", out headervalues);
-            accessToken = headervalues.FirstOrDefault();
-
-            // get linked subscription url
-            // reset the http client
-            client = new HttpClient();
-            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
-            client.DefaultRequestHeaders.Accept.ParseAdd("application/json");
-            client.DefaultRequestHeaders.UserAgent.ParseAdd("T-Mobile 5.3.28 (Android 10; 10)");
-
-            //Do a get request to get the subscriptions for this access token
-            response = await client.GetAsync("https://capi.t-mobile.nl/account/current?resourcelabel=LinkedSubscriptions");
-            
-            //get the json body from the response
-            string httpcontent = "";
-            // We get redirects that lose our authorization header. If that's the case, we repeat the request with the header again
-            while (!response.IsSuccessStatusCode)
-            {
-                var uri = response.RequestMessage.RequestUri;
-                response = await client.GetAsync(uri);
-                httpcontent = await response.Content.ReadAsStringAsync();
+                throw new InvalidOperationException("No subscription URL found for this account.");
             }
-            JObject array = JsonConvert.DeserializeObject<JObject>(httpcontent);
-            string newurl = (string) array.SelectToken("Resources[0].Url");
 
-            //get subscription url 
+            return new Session(accessToken, subscriptionUrl);
+        }
 
-            response = await client.GetAsync(newurl);
-            httpcontent = await response.Content.ReadAsStringAsync();
+        public async Task RunAutoTopUpLoopAsync(AppOptions options, Session session, CancellationToken cancellationToken)
+        {
+            var estimatedBytesPerMs = options.EstimatedBytesPerMs;
 
-            array = JsonConvert.DeserializeObject<JObject>(httpcontent);
-            subscriptionUrl = (string)array.SelectToken("subscriptions[0].SubscriptionURL");
-
-            int sleeptimer=60000;
-
-            while (true)
+            while (!cancellationToken.IsCancellationRequested)
             {
-                //get data
-                //client.DefaultRequestHeaders.TryAddWithoutValidation("Content-Type", "application/json");
-                response = await client.GetAsync(subscriptionUrl + "/roamingbundles");
-                httpcontent = await response.Content.ReadAsStringAsync();
-                
+                var roamingBundlesUrl = $"{session.SubscriptionUrl}/roamingbundles";
+                var roamingBundles = await GetJsonAsync(roamingBundlesUrl, cancellationToken);
 
-                array = JsonConvert.DeserializeObject<JObject>(httpcontent);
-                //extract how much data we have left in our bundle
-                int remaining = (int)array.SelectToken("Bundles[1].Remaining.Value");
-                Console.WriteLine("Remaining: " + remaining);
+                var hasBundle = ContainsBundle(roamingBundles, options.BundleCode);
+                var remainingBytes = GetRemainingBytes(roamingBundles);
+                Console.WriteLine($"Remaining bytes: {remainingBytes}");
 
-                //if the bundle is 0, we underestimated our speed
-                if(remaining == 0)
+                if (!hasBundle || remainingBytes < 400_000)
                 {
-                    speed++;
+                    await TopUpAsync(session, options.BundleCode, cancellationToken);
+                    remainingBytes = 2_000_000;
                 }
 
-                // If our  response body does not contain the bundle, we havent added it yet today
-                if (!httpcontent.Contains(bundle))
+                if (remainingBytes == 0)
                 {
-                    await TopUp();
-                    remaining = 2000000;
+                    estimatedBytesPerMs = Math.Max(1, estimatedBytesPerMs + 1);
                 }
-                // If we have it in the body, we need to check how much we have remaining. If there's less than 400 MB, top up
-                else
-                {
-                    //Depending on how much we have left in the bundle, we either want to top up or sleep until the bundle is running out
-                    if (remaining < 400000)
-                    {
-                        await TopUp();
-                        remaining = 2000000;
-                    }
-                    // depending on how long this bundle will last for sure, sleep
-                    sleeptimer = remaining / speed;
-                }
-                Console.WriteLine("Sleeping for "+ sleeptimer/1000 +" seconds");
-                Thread.Sleep(sleeptimer);
+
+                var delayMs = Math.Max(30_000, remainingBytes / Math.Max(1, estimatedBytesPerMs));
+                Console.WriteLine($"Sleeping for {delayMs / 1000} seconds...");
+                await Task.Delay(delayMs, cancellationToken);
             }
         }
 
-        static async System.Threading.Tasks.Task TopUp()
+        private async Task<string> RequestAuthorizationCodeAsync(AppOptions options, CancellationToken cancellationToken)
         {
-            //Making our message body to request the bundle
-            string jsontext = "{\"Bundles\":[{\"BuyingCode\":\"REPLACEME\"}]}".Replace("REPLACEME", bundle);
+            using var request = new HttpRequestMessage(HttpMethod.Post, "https://capi.t-mobile.nl/login?response_type=code")
+            {
+                Content = new FormUrlEncodedContent(new Dictionary<string, string>
+                {
+                    ["Username"] = options.Username,
+                    ["Password"] = options.Password,
+                    ["ClientId"] = ClientId,
+                    ["Scope"] = Scope
+                })
+            };
 
-            HttpClient client = new HttpClient();
-            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
-            client.DefaultRequestHeaders.Accept.ParseAdd("application/json");
-            client.DefaultRequestHeaders.UserAgent.ParseAdd("T-Mobile 5.3.28 (Android 10; 10)");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Basic", BasicAuthToken);
+            using var response = await _client.SendAsync(request, cancellationToken);
 
-            Console.WriteLine("Need new package");
-            client.BaseAddress = new Uri(subscriptionUrl + "/");
-            HttpRequestMessage request = new HttpRequestMessage(HttpMethod.Post, "roamingbundles");
-            request.Content = new StringContent(jsontext, Encoding.UTF8, "application/json");
-            HttpResponseMessage response = await client.SendAsync(request);
-            var body = await response.RequestMessage.Content.ReadAsStringAsync();
-            Console.WriteLine("The HTTP request returned: " + response.StatusCode);
+            if (!response.Headers.TryGetValues("AuthorizationCode", out var values))
+            {
+                throw new InvalidOperationException("Could not get authorization code. Check username/password.");
+            }
+
+            var code = values.FirstOrDefault();
+            if (string.IsNullOrWhiteSpace(code))
+            {
+                throw new InvalidOperationException("Authorization code header was empty.");
+            }
+
+            return code;
         }
+
+        private async Task<string> RequestAccessTokenAsync(string authorizationCode, CancellationToken cancellationToken)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, "https://capi.t-mobile.nl/createtoken")
+            {
+                Content = new FormUrlEncodedContent(new Dictionary<string, string>
+                {
+                    ["AuthorizationCode"] = authorizationCode
+                })
+            };
+
+            using var response = await _client.SendAsync(request, cancellationToken);
+
+            if (!response.Headers.TryGetValues("AccessToken", out var values))
+            {
+                throw new InvalidOperationException("Could not retrieve access token.");
+            }
+
+            var token = values.FirstOrDefault();
+            if (string.IsNullOrWhiteSpace(token))
+            {
+                throw new InvalidOperationException("Access token header was empty.");
+            }
+
+            return token;
+        }
+
+        private async Task<JObject> GetJsonWithRedirectRetryAsync(string url, CancellationToken cancellationToken)
+        {
+            for (var attempt = 0; attempt < 3; attempt++)
+            {
+                using var response = await _client.GetAsync(url, cancellationToken);
+                if (!response.IsSuccessStatusCode)
+                {
+                    continue;
+                }
+
+                return await ReadJsonAsync(response, cancellationToken);
+            }
+
+            throw new HttpRequestException($"Failed to retrieve {url} after retries.");
+        }
+
+        private async Task<JObject> GetJsonAsync(string url, CancellationToken cancellationToken)
+        {
+            using var response = await _client.GetAsync(url, cancellationToken);
+            response.EnsureSuccessStatusCode();
+            return await ReadJsonAsync(response, cancellationToken);
+        }
+
+        private static async Task<JObject> ReadJsonAsync(HttpResponseMessage response, CancellationToken cancellationToken)
+        {
+            var text = await response.Content.ReadAsStringAsync(cancellationToken);
+            var json = JObject.Parse(text);
+            return json;
+        }
+
+        private static bool ContainsBundle(JObject roamingBundles, string bundleCode)
+        {
+            var bundles = roamingBundles.SelectToken("Bundles") as JArray;
+            if (bundles is null)
+            {
+                return false;
+            }
+
+            return bundles
+                .Select(bundle => bundle.SelectToken("BuyingCode")?.ToString())
+                .Any(code => string.Equals(code, bundleCode, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static int GetRemainingBytes(JObject roamingBundles)
+        {
+            var bundle = roamingBundles.SelectToken("Bundles[1]");
+            return bundle?.SelectToken("Remaining.Value")?.Value<int>() ?? 0;
+        }
+
+        private async Task TopUpAsync(Session session, string bundleCode, CancellationToken cancellationToken)
+        {
+            Console.WriteLine("Requesting new package...");
+
+            using var request = new HttpRequestMessage(HttpMethod.Post, $"{session.SubscriptionUrl}/roamingbundles")
+            {
+                Content = new StringContent(
+                    $$"{"Bundles":[{"BuyingCode":"{{bundleCode}}"}]}",
+                    Encoding.UTF8,
+                    "application/json")
+            };
+
+            using var response = await _client.SendAsync(request, cancellationToken);
+            Console.WriteLine($"Top-up request returned: {(int)response.StatusCode} {response.StatusCode}");
+        }
+
+        public void Dispose() => _client.Dispose();
     }
 }
